@@ -4,10 +4,15 @@ use {
         io,
         net,
     },
+
     url::Url,
     tracing::{debug, instrument},
     spandoc::{spandoc},
+
+    stream::Stream,
 };
+
+mod stream;
 
 #[instrument]
 fn access_token_url(channel_name: &str) -> Url {
@@ -47,7 +52,7 @@ struct Args {
 #[paw::main]
 #[spandoc]
 fn main(args: Args) -> eyre::Result<()> {
-    use tracing_subscriber::{Registry, EnvFilter, layer::Layer};
+    use tracing_subscriber::{Registry, EnvFilter, layer::SubscriberExt};
 
     let filter = EnvFilter::try_from_default_env()
         .or_else(|_| EnvFilter::try_new("info"))
@@ -56,11 +61,15 @@ fn main(args: Args) -> eyre::Result<()> {
     let fmt = tracing_subscriber::fmt::Layer::builder()
         .with_writer(io::stderr)
         .finish();
-    let subscriber = filter//tracing_error::ErrorLayer::default()
-        //.and_then(filter)
-        .and_then(fmt)
-        //.with_subscriber(fmt);
-        .with_subscriber(Registry::default());
+    //let subscriber = tracing_error::ErrorLayer::default()
+    //    .and_then(filter)
+    //    .and_then(fmt)
+    //    //.with_subscriber(fmt);
+    //    .with_subscriber(Registry::default());
+    let subscriber = Registry::default()
+        .with(tracing_error::ErrorLayer::default())
+        .with(filter)
+        .with(fmt);
 
     /// Setting up default tracing subscriber
     tracing::subscriber::set_global_default(subscriber)?;
@@ -97,8 +106,9 @@ async fn start_stream(req: hyper::Request<hyper::Body>)
         -> eyre::Result<hyper::Response<hyper::Body>> {
     use hyper::{Body, body::Bytes, Response};
     let mut segments = req.uri().path().split('/').skip(1);
-    let channel_name = segments.next().unwrap_or("hungry");
-    let minimum_resolution = segments.next()
+    let channel_name = segments.next().filter(|x| !x.is_empty())
+        .unwrap_or("hungry");
+    let minimum_resolution = segments.next().filter(|x| !x.is_empty())
         .and_then(|s| u32::from_str(s).ok()).unwrap_or(0);
     let playlist_url =
         get_variant_playlist_url(channel_name, minimum_resolution).await?;
@@ -106,13 +116,14 @@ async fn start_stream(req: hyper::Request<hyper::Body>)
     use tokio::process::Command;
     use std::process::Stdio;
     let mut child = Command::new("ffmpeg")
-        .kill_on_drop(true)
         .args(&[
             "-loglevel", "error",
             "-i", &playlist_url,
             "-f", "gif",
+            "-loop", "-1",
             "-"])
         .stdout(Stdio::piped())
+        .kill_on_drop(true)
         .spawn()?;
 
     let (mut sender, body) = Body::channel();
@@ -123,10 +134,26 @@ async fn start_stream(req: hyper::Request<hyper::Body>)
         use tokio::io::AsyncReadExt;
         let mut buf = [0u8; 8*1024];
 
+        let mut stream = Stream::new();
+        let mut offset = 0usize;
+
         loop {
             let n = child_output.read(&mut buf).await?;
-            if n > 0 {
-                let bytes = Bytes::copy_from_slice(&buf[..n]);
+            if n <= 0 {
+                continue;
+            }
+            let buf = &buf[..n];
+
+            stream.write(buf)?;
+
+            loop {
+                let (new_offset, data) = stream.read_after(offset);
+                if offset >= new_offset {
+                    break;
+                }
+                offset = new_offset;
+
+                let bytes = Bytes::copy_from_slice(data);
                 sender.send_data(bytes).await?;
             }
         }
@@ -190,7 +217,7 @@ async fn get_variant_playlist_url(channel_name: &str, minimum_resolution: u32)
         .find(|s| s.resolution().map(|r|r.height as u32 >= minimum_resolution)
             .unwrap_or(false))
         .or(highest_rendition)
-        .ok_or_else(|| eyre::err!("no rendition available"))?;
+        .ok_or_else(|| eyre::eyre!("no rendition available"))?;
     debug!(?rendition, "selected rendition");
 
     Ok(rendition.uri().to_string())

@@ -8,7 +8,7 @@ edition = "2018"
 reqwest = { version = "0.10", features = ["blocking", "json"] }
 structopt = { version = "0.2", features = ["paw"] }
 paw = "1.0"
-eyre = "0.1"
+eyre = "0.3"
 #anyhow = "1.0"
 url = "2.1.0"
 tracing = "0.1.8"
@@ -22,3 +22,4 @@ spandoc = "0.1"
 hls_m3u8 = "0.2"
 hyper = "0.13"
 tokio = { version = "0.2.11", features = ["process", "macros"] }
+gif = "0.10.3"
